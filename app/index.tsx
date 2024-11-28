@@ -369,38 +369,51 @@ useEffect(() => {
 
   return (
     <ScrollView style={[styles.container, { backgroundColor: theme.background }]}>
+      {/* Header */}
+      <View style={styles.header}>
+        <Text style={[styles.headerText, { color: theme.text }]}>
+          Smart Water Dispenser
+        </Text>
+      </View>
+  
+      {/* Main Content */}
       <View style={[styles.card, { backgroundColor: theme.cardBackground }]}>
-                <View style={styles.content}>
+        <View style={styles.content}>
           {/* Water Level Indicator */}
           <View style={styles.section}>
-  <View style={styles.row}>
-    <Feather
-      name="droplet"
-      size={20}
-      color={waterLevel > 20 ? theme.accent : theme.danger}
-      style={{ marginRight: 8 }}
-    />
-    <Text
-      style={[
-        styles.sectionTitle,
-        { color: waterLevel <= 20 ? theme.danger : theme.text },
-      ]}
-    >
-      Water Level: {waterLevel}%
-    </Text>
-  </View>
-  <View style={[styles.progressContainer, { backgroundColor: theme.progressBackground }]}>
-    <View
-      style={[
-        styles.progressBar,
-        {
-          width: `${waterLevel}%`,
-          backgroundColor: waterLevel <= 20 ? theme.danger : theme.accent,
-        },
-      ]}
-    />
-  </View>
-</View>
+            <View style={styles.row}>
+              <Feather
+                name="droplet"
+                size={20}
+                color={waterLevel > 20 ? theme.accent : theme.danger}
+                style={{ marginRight: 8 }}
+              />
+              <Text
+                style={[
+                  styles.sectionTitle,
+                  { color: waterLevel <= 20 ? theme.danger : theme.text },
+                ]}
+              >
+                Water Level: {waterLevel}%
+              </Text>
+            </View>
+            <View
+              style={[
+                styles.progressContainer,
+                { backgroundColor: theme.progressBackground },
+              ]}
+            >
+              <View
+                style={[
+                  styles.progressBar,
+                  {
+                    width: `${waterLevel}%`,
+                    backgroundColor: waterLevel <= 20 ? theme.danger : theme.accent,
+                  },
+                ]}
+              />
+            </View>
+          </View>
 
           {/* Control Buttons */}
           <View style={styles.buttonContainer}>
@@ -509,6 +522,11 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 16,
+    paddingVertical: 16,
+  },
+  headerText: {
+    fontSize: 24,
+    fontWeight: 'bold',
   },
   title: {
     fontSize: 20,
