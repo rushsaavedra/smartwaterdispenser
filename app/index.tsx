@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -6,21 +6,170 @@ import {
   TouchableOpacity,
   ScrollView,
   Switch,
+  Alert,
+  Modal,
+  TextInput,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
+import * as Notifications from 'expo-notifications';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+// Configure notifications
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: true,
+  }),
+});
 
 interface UsageHistoryItem {
   timestamp: Date;
   amount: number;
 }
 
+interface AppSettings {
+  lowWaterThreshold: number;
+  dispensingSpeed: number;
+  dispensingVolume: number;
+}
+
+interface UsageHistoryItem {
+  timestamp: Date;
+  amount: number; // For dispensing amounts
+  event?: string; // Optional field for event type like "Refill"
+}
+
 const SmartWaterDispenser = () => {
+  // State Variables
   const [isDispensing, setIsDispensing] = useState(false);
   const [waterLevel, setWaterLevel] = useState(100);
   const [usageHistory, setUsageHistory] = useState<UsageHistoryItem[]>([]);
   const [isDarkMode, setIsDarkMode] = useState(false);
+  const [isSettingsModalVisible, setIsSettingsModalVisible] = useState(false);
+  
+  // Settings State
+  const [settings, setSettings] = useState<AppSettings>({
+    lowWaterThreshold: 20,
+    dispensingSpeed: 100, // milliseconds per 1% water
+    dispensingVolume: 10, // ml per 1%
+  });
+
+  // Notification State
+  const [hasShownLowWaterNotification, setHasShownLowWaterNotification] = useState(false);
+  const [notificationError, setNotificationError] = useState<string | null>(null);
+
+  // Refs
   const dispensingTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const startLevel = useRef<number>(100);
+
+  // Load Settings and Request Notifications on Mount
+  useEffect(() => {
+    loadSettings();
+    requestNotificationPermission();
+  }, []);
+
+  // Monitor water level and send notifications
+useEffect(() => {
+  if (waterLevel <= settings.lowWaterThreshold && !hasShownLowWaterNotification) {
+    sendLowWaterLevelNotification();
+    setHasShownLowWaterNotification(true);
+  } else if (waterLevel > settings.lowWaterThreshold) {
+    setHasShownLowWaterNotification(false);
+  }
+
+  if (waterLevel === 0) {
+    sendEmptyWaterNotification();
+  }
+}, [waterLevel, settings.lowWaterThreshold]);
+
+
+  // Load Saved Settings
+  const loadSettings = async () => {
+    try {
+      const savedSettings = await AsyncStorage.getItem('waterDispenserSettings');
+      if (savedSettings) {
+        setSettings(JSON.parse(savedSettings));
+      }
+    } catch (error) {
+      console.error('Error loading settings:', error);
+    }
+  };
+
+  // Save Settings
+  const saveSettings = async (newSettings: AppSettings) => {
+    try {
+      await AsyncStorage.setItem('waterDispenserSettings', JSON.stringify(newSettings));
+      setSettings(newSettings);
+      setIsSettingsModalVisible(false);
+    } catch (error) {
+      console.error('Error saving settings:', error);
+      Alert.alert('Save Error', 'Could not save settings');
+    }
+  }
+
+  // Notification Permission Request
+  const requestNotificationPermission = async () => {
+    try {
+      const { status, canAskAgain } = await Notifications.requestPermissionsAsync();
+      if (status !== 'granted') {
+        if (canAskAgain) {
+          Alert.alert(
+            'Notification Permission',
+            'Please enable notifications to receive water level alerts.',
+            [
+              { 
+                text: 'OK', 
+                style: 'default'
+              }
+            ]
+          );
+        }
+        setNotificationError('Notifications not permitted');
+      }
+    } catch (error) {
+      console.error('Notification permission error:', error);
+      setNotificationError('Could not request notification permissions');
+    }
+  };
+
+  // Low Water Level Notification
+  const sendLowWaterLevelNotification = async () => {
+    if (notificationError) return;
+
+    try {
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: "Low Water Level",
+          body: `Water dispenser is below ${settings.lowWaterThreshold}%! Please refill soon.`,
+          sound: true,
+        },
+        trigger: null,
+      });
+    } catch (error) {
+      console.error('Notification scheduling error:', error);
+      setNotificationError('Could not send notification');
+    }
+  };
+
+  const sendEmptyWaterNotification = async () => {
+    if (notificationError) return;
+  
+    try {
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: "Water Dispenser Empty",
+          body: "The water level is at 0%. Please refill immediately to continue usage.",
+          sound: true,
+        },
+        trigger: null,
+      });
+    } catch (error) {
+      console.error("Notification scheduling error:", error);
+      setNotificationError("Could not send empty water notification");
+    }
+  };
+  
 
   const theme = {
     background: isDarkMode ? '#1F2937' : 'white',
@@ -57,6 +206,7 @@ const SmartWaterDispenser = () => {
     }
   };
 
+  // Dispensing Logic with Customizable Speed
   const handleDispense = () => {
     if (waterLevel > 0) {
       startLevel.current = waterLevel;
@@ -66,14 +216,13 @@ const SmartWaterDispenser = () => {
         setWaterLevel(prev => {
           const newLevel = prev - 1;
           if (newLevel <= 0) {
-            // Handle complete dispensing
             recordUsage(0);
             handleStopDispensing();
             return 0;
           }
           return newLevel;
         });
-      }, 100);
+      }, settings.dispensingSpeed);
     }
   };
 
@@ -90,38 +239,59 @@ const SmartWaterDispenser = () => {
     setIsDispensing(false);
   };
 
-  const handleRefill = () => {
+  const handleRefill = async () => {
     if (!isDispensing) {
       setWaterLevel(100);
       startLevel.current = 100;
+      setHasShownLowWaterNotification(false);
+  
+      // Add a log for refill
+      setUsageHistory((prev) => [
+        ...prev,
+        {
+          timestamp: new Date(),
+          amount: 0, // Amount is 0 for refill
+          event: "Refill", // Add a label for the refill event
+        },
+      ].slice(-5)); // Limit to the last 5 entries
+  
+      // Send a notification about refill
+      try {
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title: "Water Refilled",
+            body: "The water dispenser has been refilled to 100%.",
+            sound: true,
+          },
+          trigger: null,
+        });
+      } catch (error) {
+        console.error("Notification scheduling error:", error);
+      }
     }
   };
+  
+  
 
-  return (
-    <ScrollView style={[styles.container, { backgroundColor: theme.background }]}>
-      <View style={[styles.card, { backgroundColor: theme.cardBackground }]}>
-        {/* Header */}
-        <View style={styles.header}>
-          <Text style={[styles.title, { color: theme.text }]}>
-            Smart Water Dispenser
-          </Text>
-          <Feather 
-            name="droplet" 
-            size={24} 
-            color={waterLevel > 20 ? theme.accent : theme.danger} 
-          />
-        </View>
-
-        <View style={styles.content}>
-          {/* Dark Mode Toggle */}
-          <View style={styles.section}>
-            <View style={styles.row}>
-              <Feather 
-                name={isDarkMode ? "moon" : "sun"} 
-                size={20} 
-                color={theme.text} 
-              />
-              <Text style={[styles.sectionTitle, { color: theme.text }]}>
+  const SettingsModal = () => {
+    const [localSettings, setLocalSettings] = useState<AppSettings>(settings);
+  
+    return (
+      <Modal
+        visible={isSettingsModalVisible}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setIsSettingsModalVisible(false)}
+      >
+        <View style={styles.modalContainer}>
+          <View style={[styles.modalContent, { backgroundColor: theme.cardBackground }]}>
+            <Text style={[styles.modalTitle, { color: theme.text }]}>
+              Dispenser Settings
+            </Text>
+  
+            {/* Dark Mode Toggle */}
+            <View style={styles.settingItem}>
+              <Text style={[styles.settingLabel, { color: theme.text }]}>
                 Dark Mode
               </Text>
               <Switch
@@ -129,25 +299,108 @@ const SmartWaterDispenser = () => {
                 onValueChange={setIsDarkMode}
                 trackColor={{ false: theme.border, true: theme.accent }}
                 thumbColor={isDarkMode ? '#F3F4F6' : '#F9FAFB'}
-                style={{ marginLeft: 'auto' }}
               />
             </View>
+  
+            {/* Low Water Alert Threshold */}
+            <View style={styles.settingItem}>
+              <Text style={[styles.settingLabel, { color: theme.text }]}>
+                Low Water Alert Threshold (%)
+              </Text>
+              <TextInput
+                style={[styles.settingInput, { color: theme.text, borderColor: theme.border }]}
+                keyboardType="numeric"
+                value={localSettings.lowWaterThreshold.toString()}
+                onChangeText={(text) =>
+                  setLocalSettings(prev => ({ ...prev, lowWaterThreshold: Number(text) }))
+                }
+              />
+            </View>
+  
+            {/* Dispensing Speed */}
+            <View style={styles.settingItem}>
+              <Text style={[styles.settingLabel, { color: theme.text }]}>
+                Dispensing Speed (ms per 1%)
+              </Text>
+              <TextInput
+                style={[styles.settingInput, { color: theme.text, borderColor: theme.border }]}
+                keyboardType="numeric"
+                value={localSettings.dispensingSpeed.toString()}
+                onChangeText={(text) =>
+                  setLocalSettings(prev => ({ ...prev, dispensingSpeed: Number(text) }))
+                }
+              />
+            </View>
+  
+            {/* Dispensing Volume */}
+            <View style={styles.settingItem}>
+              <Text style={[styles.settingLabel, { color: theme.text }]}>
+                Dispensing Volume (ml per 1%)
+              </Text>
+              <TextInput
+                style={[styles.settingInput, { color: theme.text, borderColor: theme.border }]}
+                keyboardType="numeric"
+                value={localSettings.dispensingVolume.toString()}
+                onChangeText={(text) =>
+                  setLocalSettings(prev => ({ ...prev, dispensingVolume: Number(text) }))
+                }
+              />
+            </View>
+  
+            <View style={styles.modalButtonContainer}>
+              <TouchableOpacity
+                style={[styles.modalButton, { backgroundColor: theme.accent }]}
+                onPress={() => saveSettings(localSettings)}
+              >
+                <Text style={styles.modalButtonText}>Save</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.cancelButton]}
+                onPress={() => setIsSettingsModalVisible(false)}
+              >
+                <Text style={styles.modalButtonText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
           </View>
+        </View>
+      </Modal>
+    );
+  };
 
+  return (
+    <ScrollView style={[styles.container, { backgroundColor: theme.background }]}>
+      <View style={[styles.card, { backgroundColor: theme.cardBackground }]}>
+                <View style={styles.content}>
           {/* Water Level Indicator */}
           <View style={styles.section}>
-            <Text style={[styles.sectionTitle, { color: theme.text }]}>
-              Water Level: {waterLevel}%
-            </Text>
-            <View style={[styles.progressContainer, { backgroundColor: theme.progressBackground }]}>
-              <View 
-                style={[
-                  styles.progressBar,
-                  { width: `${waterLevel}%` }
-                ]} 
-              />
-            </View>
-          </View>
+  <View style={styles.row}>
+    <Feather
+      name="droplet"
+      size={20}
+      color={waterLevel > 20 ? theme.accent : theme.danger}
+      style={{ marginRight: 8 }}
+    />
+    <Text
+      style={[
+        styles.sectionTitle,
+        { color: waterLevel <= 20 ? theme.danger : theme.text },
+      ]}
+    >
+      Water Level: {waterLevel}%
+    </Text>
+  </View>
+  <View style={[styles.progressContainer, { backgroundColor: theme.progressBackground }]}>
+    <View
+      style={[
+        styles.progressBar,
+        {
+          width: `${waterLevel}%`,
+          backgroundColor: waterLevel <= 20 ? theme.danger : theme.accent,
+        },
+      ]}
+    />
+  </View>
+</View>
 
           {/* Control Buttons */}
           <View style={styles.buttonContainer}>
@@ -193,25 +446,42 @@ const SmartWaterDispenser = () => {
               </Text>
             </View>
             {usageHistory.map((usage, index) => {
-              const { date, time } = formatDateTime(usage.timestamp);
-              return (
-                <View key={index} style={styles.historyItem}>
-                  <View style={styles.historyDateTime}>
-                    <Text style={[styles.historyText, { color: theme.secondaryText }]}>
-                      {date}
-                    </Text>
-                    <Text style={[styles.historyText, { color: theme.secondaryText, marginLeft: 8 }]}>
-                      {time}
-                    </Text>
-                  </View>
-                  <Text style={[styles.historyText, { color: theme.secondaryText }]}>
-                    {Math.round(usage.amount)}ml
-                  </Text>
-                </View>
-              );
-            })}
+  const { date, time } = formatDateTime(usage.timestamp);
+  return (
+    <View key={index} style={styles.historyItem}>
+      <View style={styles.historyDateTime}>
+        <Text style={[styles.historyText, { color: theme.secondaryText }]}>
+          {date}
+        </Text>
+        <Text style={[styles.historyText, { color: theme.secondaryText, marginLeft: 8 }]}>
+          {time}
+        </Text>
+      </View>
+      <Text style={[styles.historyText, { color: theme.secondaryText }]}>
+        {usage.event === "Refill" ? "Refill" : `${Math.round(usage.amount)}ml`}
+      </Text>
+    </View>
+  );
+})}
+
           </View>
         </View>
+        {/* Add Settings Button in Header */}
+      <TouchableOpacity 
+        style={styles.settingsButton} 
+        onPress={() => setIsSettingsModalVisible(true)}
+      >
+        <Feather name="settings" size={24} color={theme.text} />
+      </TouchableOpacity>
+
+      {/* Notification Error Alert */}
+      {notificationError && (
+        <View style={[styles.notificationErrorContainer, { backgroundColor: theme.danger }]}>
+          <Text style={styles.notificationErrorText}>{notificationError}</Text>
+        </View>
+      )}
+
+      <SettingsModal />
       </View>
     </ScrollView>
   );
@@ -312,6 +582,70 @@ const styles = StyleSheet.create({
   },
   historyText: {
     fontSize: 14,
+  },
+  
+  modalContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  modalContent: {
+    width: '85%',
+    padding: 20,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 20,
+  },
+  settingItem: {
+    width: '100%',
+    marginBottom: 15,
+  },
+  settingLabel: {
+    marginBottom: 5,
+  },
+  settingInput: {
+    borderWidth: 1,
+    borderRadius: 5,
+    padding: 10,
+  },
+  modalButtonContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    width: '100%',
+    marginTop: 20,
+  },
+  modalButton: {
+    flex: 1,
+    padding: 12,
+    borderRadius: 6,
+    alignItems: 'center',
+    marginHorizontal: 5,
+  },
+  modalButtonText: {
+    color: 'white',
+    fontWeight: '500',
+  },
+  cancelButton: {
+    backgroundColor: '#6B7280', // Gray color
+  },
+  settingsButton: {
+    position: 'absolute',
+    top: 16,
+    right: 16,
+  },
+  notificationErrorContainer: {
+    padding: 10,
+    borderRadius: 5,
+    marginBottom: 10,
+  },
+  notificationErrorText: {
+    color: 'white',
+    textAlign: 'center',
   },
 });
 
